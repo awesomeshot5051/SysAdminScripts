@@ -1,0 +1,15 @@
+Source: nasmv
+Section: utils
+Priority: optional
+Maintainer: awesomeshot5051 <englandtechnologies@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: nasmv
+Architecture: all
+Depends: ${misc:Depends}, bash, rsync
+Description: Fast move or copy of files to a file server
+ nasmv moves (or copies) files to a file server using rsync, tuned for a
+ gigabit LAN. The source is deleted only after each file is confirmed
+ transferred.

@@ -1,0 +1,10 @@
+Package: fastget
+Version: 1.0.0
+Architecture: all
+Maintainer: awesomeshot5051 englandtechnologies@gmail.com
+Depends: bash, aria2
+Section: utils
+Priority: optional
+Description: Multi-connection file downloader
+ fastget wraps aria2c to download a file over many parallel connections
+ (16 by default) and saves it to a chosen directory.

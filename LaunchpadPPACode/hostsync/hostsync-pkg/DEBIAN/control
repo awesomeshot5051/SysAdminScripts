@@ -1,0 +1,11 @@
+Package: hostsync
+Version: 1.0.0
+Architecture: all
+Maintainer: awesomeshot5051 englandtechnologies@gmail.com
+Depends: python3, rsync, openssh-client
+Recommends: sshpass, dnsutils
+Section: utils
+Priority: optional
+Description: rsync wrapper for syncing files across many hosts
+ hostsync pushes files or directories to one or many hosts over rsync and
+ ssh, with host lists, subnet and domain discovery, and exclusions.

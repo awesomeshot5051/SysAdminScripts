@@ -1,0 +1,10 @@
+Package: screenson
+Version: 1.0.0
+Architecture: all
+Maintainer: awesomeshot5051 englandtechnologies@gmail.com
+Depends: bash, ddcutil
+Section: utils
+Priority: optional
+Description: Reset monitor brightness to 100% over DDC/CI
+ screenson uses ddcutil to reset the hardware brightness of displays 1 to 3
+ to 100%. It must be run as root.

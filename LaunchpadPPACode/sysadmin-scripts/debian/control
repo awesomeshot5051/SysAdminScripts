@@ -1,0 +1,14 @@
+Source: sysadmin-scripts
+Section: utils
+Priority: optional
+Maintainer: awesomeshot5051 <englandtechnologies@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: sysadmin-scripts
+Architecture: all
+Depends: ${misc:Depends}, catdir, fastget, hostsync, nasmv, rawproject, screenson, sshtest, tovinci (>= 3.0.0), ytdownload
+Description: Bundle of home lab sysadmin and media scripts
+ Meta-package that installs catdir, fastget, hostsync, nasmv, rawproject,
+ screenson, sshtest, tovinci and ytdownload.

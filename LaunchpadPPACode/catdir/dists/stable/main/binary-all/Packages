@@ -1,0 +1,35 @@
+Package: catdir
+Version: 1.0.0
+Architecture: all
+Maintainer: awesomeshot5051 englandtechnologies@gmail.com
+Depends: bash, coreutils, findutils | fd-find | ripgrep, jq, tree
+Filename: pool/main/catdir_1.0.0_all.deb
+Size: 4808
+MD5sum: 92f142ae9a7d99a607be14189a3040ed
+SHA1: 3317ff074b8390888d51ac83859ac45f9e509403
+SHA256: 679f8f5470043309e24212e09a1053d7b792850d390f391f7404a14a1cba6fc6
+Section: utils
+Priority: optional
+Description: A robust directory-to-context text aggregator.
+ catdir crawls a directory, filters out binary files, respects depths/sizes,
+ and outputs a cleanly structured layout or JSON stream. Ideal for gathering
+ codebase context for analysis or documentation.
+
+Package: catdir
+Version: 2.0.0
+Architecture: all
+Maintainer: awesomeshot5051 englandtechnologies@gmail.com
+Depends: python3
+Recommends: fd-find | ripgrep
+Filename: pool/main/catdir_2.0.0_all.deb
+Size: 6956
+MD5sum: 85469f634e9c4df373da39c7b43b03ea
+SHA1: 57167b1156eab9f909fb8d54f43e1584c625d399
+SHA256: a23c3a0740ea0e2572351c17b80154b877e84f3bd64a3cb555db63baaaeb81c4
+Section: utils
+Priority: optional
+Description: A robust directory-to-context text aggregator.
+ catdir crawls a directory, filters out binary files, respects depths/sizes,
+ and outputs a cleanly structured layout or JSON stream. Ideal for gathering
+ codebase context for analysis or documentation.
+

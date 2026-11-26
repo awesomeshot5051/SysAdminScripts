@@ -1,0 +1,46 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Format: 1.8
+Date: Wed, 18 Nov 2026 11:41:54 -0500
+Source: catdir
+Architecture: source
+Version: 2.0.0+resolute1
+Distribution: resolute
+Urgency: medium
+Maintainer: awesomeshot5051 <englandtechnologies@gmail.com>
+Changed-By: awesomeshot5051 <englandtechnologies@gmail.com>
+Changes:
+ catdir (2.0.0+resolute1) resolute; urgency=medium
+ .
+   * Release 2.0.0 for Ubuntu resolute.
+Checksums-Sha1:
+ 17308554cb99c8ea355c1299f53ddc4cdf678e8b 1480 catdir_2.0.0+resolute1.dsc
+ 18560d093a87b01e3d902b037c49c9b3ca093236 7116 catdir_2.0.0+resolute1.tar.xz
+ f747b56f38c382de76c494c364e212153ee0d75e 6629 catdir_2.0.0+resolute1_source.buildinfo
+Checksums-Sha256:
+ 0803d112b301376848e1291649539ceb4d5e180408a4fa5f789b9956a39f00cb 1480 catdir_2.0.0+resolute1.dsc
+ 6ec4f2e164f4c4bd581bee9dd979688eb9a253a680bc594216bc00ed241ded01 7116 catdir_2.0.0+resolute1.tar.xz
+ 5e25a2189352e7c41295569e601f85bb635080d9e62f74ef22757bd8341d3c94 6629 catdir_2.0.0+resolute1_source.buildinfo
+Files:
+ e580ebad697516cd6deb26e15e6e1e8e 1480 utils optional catdir_2.0.0+resolute1.dsc
+ 112a05494340710dcfd4a4529cf72751 7116 utils optional catdir_2.0.0+resolute1.tar.xz
+ af8609ecd632d3c037656c1253ed1ade 6629 utils optional catdir_2.0.0+resolute1_source.buildinfo
+
+-----BEGIN PGP SIGNATURE-----
+
+iQJSBAEBCgA8FiEESC7uSfzQ5lBjznTIrivklaW6b7wFAmr91VMeHGVuZ2xhbmR0
+ZWNobm9sb2dpZXNAZ21haWwuY29tAAoJEK4r5JWlum+8lQIP+wfccc3gi0AWcd1f
+TPda4cCXh3DaE2QaFNa1nLt+STlNuSvtqmzZj9L3hVonA9fP6rJTVCZG5DrIiFBG
+Hu5R5bPt24y50Q/UEY9biFL8pJS3b1spUAJZeEj2VaTP6WI86WLsF7oDnEh2Ax2S
+IK9+boq0kjcsaVsgG7ceqsgcuaq0cvFxm20woYrc6hJIwoYrgQmH08RWWsQOjUMd
+sqZak8ubTgl1h409d2jGWBAl/qPJmMtIklTTS48JXBjh8p6sR6Jflt9R+FGCdCZK
+fOSbDSgq6VO678znIIG5wqndbVGYZt+62J9yJhPZ4xhbaYlQ/frzM9X+EkY+LHOm
+GYMgXg9Y5boFFJ14LOWl2DkjqNLqttNKzKbbNQDJr3ild59v+iU0lGcFy8+d+RqI
+NwsDtF2jFdZtn/d6QEVS3j+ZZd+yZIw/S/naZFxXXl114ZPAKzNHgiHe5+JfKN8x
+c2CW7+e4pSvFUij+xfJ3L00h2OLMdFWuMle7zFZOJGMFpLvOmmuVfmmumMWMkEIp
+9qxc1CjqUQGJUR1pPbexGRrB0cam33/fUMOJ+7ASDqpdwyJ5b4suNcGgEVU3tyIK
+hKxq7/8R2+Iog9NJwJ25JhyQRFfGVz7p23irE9Xmyeyasj+4yz7PWEAlNvw4lLAw
+cCWj6+UDLtdAW4KuqHmZVX4FcF4y
+=V4X2
+-----END PGP SIGNATURE-----

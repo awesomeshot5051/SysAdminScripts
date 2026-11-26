@@ -1,0 +1,11 @@
+Package: sshtest
+Version: 1.0.0
+Architecture: all
+Maintainer: awesomeshot5051 englandtechnologies@gmail.com
+Depends: bash, openssh-client
+Recommends: sshpass
+Section: utils
+Priority: optional
+Description: Wait for a host to come up and accept SSH logins
+ sshtest polls a host until it accepts SSH logins, with adjustable
+ verbosity. Uses sshpass for password checks when available.

@@ -1,0 +1,15 @@
+Source: sshtest
+Section: utils
+Priority: optional
+Maintainer: awesomeshot5051 <englandtechnologies@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: sshtest
+Architecture: all
+Depends: ${misc:Depends}, bash, openssh-client
+Recommends: sshpass
+Description: Wait for a host to come up and accept SSH logins
+ sshtest polls a host until it accepts SSH logins, with adjustable
+ verbosity. Uses sshpass for password checks when available.

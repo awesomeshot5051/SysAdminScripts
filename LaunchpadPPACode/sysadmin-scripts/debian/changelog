@@ -1,0 +1,11 @@
+sysadmin-scripts (1.0.1) resolute; urgency=medium
+
+  * Require tovinci (>= 3.0.0).
+
+ -- awesomeshot5051 <englandtechnologies@gmail.com>  Thu, 26 Nov 2026 02:03:09 -0500
+
+sysadmin-scripts (1.0.0) resolute; urgency=medium
+
+  * Initial release.
+
+ -- awesomeshot5051 <englandtechnologies@gmail.com>  Wed, 18 Nov 2026 12:00:00 -0600

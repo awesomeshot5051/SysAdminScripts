@@ -1,0 +1,15 @@
+Source: ytdownload
+Section: utils
+Priority: optional
+Maintainer: awesomeshot5051 <englandtechnologies@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: ytdownload
+Architecture: all
+Depends: ${misc:Depends}, bash, tovinci
+Recommends: yt-dlp, ffmpeg
+Description: yt-dlp wrapper with mp4, mp3, mov and wav output
+ ytdownload downloads video or audio with yt-dlp at the best resolution
+ and can convert the result to MOV or WAV using tovinci.

@@ -1,0 +1,15 @@
+Source: tovinci
+Section: utils
+Priority: optional
+Maintainer: awesomeshot5051 <englandtechnologies@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: tovinci
+Architecture: all
+Depends: ${misc:Depends}, python3, ffmpeg
+Description: Convert media into DaVinci Resolve friendly formats
+ tovinci converts video to DNxHR, ProRes or H.264, audio to WAV and images
+ to JPEG using ffmpeg. It can combine clips, resume long jobs and estimate
+ output size with a dry run.

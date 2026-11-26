@@ -1,0 +1,14 @@
+Source: fastget
+Section: utils
+Priority: optional
+Maintainer: awesomeshot5051 <englandtechnologies@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: fastget
+Architecture: all
+Depends: ${misc:Depends}, bash, aria2
+Description: Multi-connection file downloader
+ fastget wraps aria2c to download a file over many parallel connections
+ (16 by default) and saves it to a chosen directory.

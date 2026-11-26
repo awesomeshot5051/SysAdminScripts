@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: tovinci
+
+Files: *
+Copyright: awesomeshot5051
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0. On Debian systems, the full
+ text is in /usr/share/common-licenses/Apache-2.0.

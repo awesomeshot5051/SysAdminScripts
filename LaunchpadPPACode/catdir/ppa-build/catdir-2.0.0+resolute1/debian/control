@@ -1,0 +1,16 @@
+Source: catdir
+Section: utils
+Priority: optional
+Maintainer: awesomeshot5051 <englandtechnologies@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: catdir
+Architecture: all
+Depends: ${misc:Depends}, python3
+Recommends: fd-find | ripgrep
+Description: Directory-to-context text aggregator
+ catdir crawls a directory, filters out binary files, respects depths and
+ sizes, and outputs a cleanly structured layout or JSON stream. Ideal for
+ gathering codebase context for analysis or documentation.

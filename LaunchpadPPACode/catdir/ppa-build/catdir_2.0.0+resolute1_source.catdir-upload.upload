@@ -1,0 +1,9 @@
+2026-11-18 11:41:55,908 - dput[70618]: uploader.invoke_dput - Uploading catdir using ftp to catdir-upload (host: ppa.launchpad.net; directory: ~awesomeshot5051/ubuntu/catdir)
+2026-11-18 11:41:55,909 - dput[70618]: hook.run_hook - running allowed-distribution: check whether a local profile permits uploads to the target distribution
+2026-11-18 11:41:55,911 - dput[70618]: hook.run_hook - running checksum: verify checksums before uploading
+2026-11-18 11:41:55,914 - dput[70618]: hook.run_hook - running suite-mismatch: check the target distribution for common errors
+2026-11-18 11:41:55,916 - dput[70618]: hook.run_hook - running gpg: check GnuPG signatures before the upload
+2026-11-18 11:41:56,658 - dput[70618]: uploader.invoke_dput - Uploading catdir_2.0.0+resolute1.dsc
+2026-11-18 11:41:57,311 - dput[70618]: uploader.invoke_dput - Uploading catdir_2.0.0+resolute1.tar.xz
+2026-11-18 11:41:57,873 - dput[70618]: uploader.invoke_dput - Uploading catdir_2.0.0+resolute1_source.buildinfo
+2026-11-18 11:41:58,450 - dput[70618]: uploader.invoke_dput - Uploading catdir_2.0.0+resolute1_source.changes

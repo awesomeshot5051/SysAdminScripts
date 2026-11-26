@@ -1,0 +1,6 @@
+catdir (2.0.0) resolute; urgency=medium
+
+  * Rewrite catdir in Python with directory-aware ignore patterns.
+  * Depend on python3 instead of bash, jq and tree.
+
+ -- awesomeshot5051 <englandtechnologies@gmail.com>  Wed, 18 Nov 2026 12:00:00 -0600

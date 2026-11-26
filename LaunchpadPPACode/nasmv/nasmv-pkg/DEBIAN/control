@@ -1,0 +1,11 @@
+Package: nasmv
+Version: 1.0.0
+Architecture: all
+Maintainer: awesomeshot5051 englandtechnologies@gmail.com
+Depends: bash, rsync
+Section: utils
+Priority: optional
+Description: Fast move or copy of files to a file server
+ nasmv moves (or copies) files to a file server using rsync, tuned for a
+ gigabit LAN. The source is deleted only after each file is confirmed
+ transferred.

@@ -11,7 +11,25 @@ and long jobs can be resumed after an interruption (-r). A dry run (-n) estimate
 the output size without writing any output files, and -o sends the results to a
 directory of your choice.
 
+VP9 (-t vp9, -t vp9-hq) produces a far smaller long-GOP .mkv (VP9 CRF video, ALAC
+audio) than DNxHR. Which type a plain "tovinci clip.mov" produces is set by the
+DEFAULT_VIDEO_TYPE constant below, or per shell by the TOVINCI_DEFAULT_TYPE
+environment variable (dnxhr, vp9, vp9-hq, mp4, mp4-small, prores, prores-422, ...).
+
 Changelog:
+  3.0.0  Added -t vp9 / vp9-hq (libvpx-vp9 CRF in .mkv, ALAC audio, row-mt on, tile
+         columns maxed for the resolution, encoder threads set explicitly) and -t dnxhr.
+         The default video type is now configurable (DEFAULT_VIDEO_TYPE or the
+         TOVINCI_DEFAULT_TYPE environment variable); it stays DNxHR until changed.
+         With -r -c, -j N now encodes N clips at the same time, splitting the CPU
+         threads between them (one VP9 encode cannot keep 32 threads busy).
+         Added --cpu-used N (0-5) to trade VP9 quality/size for encoding speed
+         (default 2; higher is faster, a little bigger or softer at the same CRF).
+         Added the job queue: --queue-add lines up conversions (current folder, relative
+         or full paths), --queue-run works through them one at a time and waits 15
+         seconds after each so the output is fully written; also --queue-list,
+         --queue-clear, --queue-remove, --queue-gap and --queue-stop-on-error. -j works
+         with it (jobs of one folder run side by side, other folders wait their turn).
   2.5.0  Added -o/--output-dir: write every output file into a chosen directory
          (created if missing). Batch runs refuse to start if two inputs would collide
          on the same output name. The dry run checks free space at that location.
@@ -28,6 +46,8 @@ Changelog:
 from __future__ import annotations
 
 import argparse
+import atexit
+import fcntl
 import glob
 import hashlib
 import json
@@ -35,20 +55,24 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.5.0"
+VERSION = "3.0.0"
 RUN_MARKER = "=== RUN START"
 AUTO_THREAD_BYTES = 10 * 1024 * 1024 * 1024  # 10GB auto-threading threshold
-FORBIDDEN_CACHE_ROOT = os.environ.get("TOVINCI_FORBIDDEN_ROOT", "")  # optional: a directory resume data must never live under
+FORBIDDEN_CACHE_ROOT = "/mnt/Data"  # resume data must never live on the secondary drive
 RULE = "-" * 56
+QUEUE_GAP_DEFAULT = 15  # seconds to wait after each queued job before starting the next
 
 DRY_RUN_WINDOWS = 3        # number of sample windows taken per clip
 DRY_RUN_SECONDS = 4.0      # length of each sample window in seconds
@@ -56,6 +80,15 @@ DRY_RUN_SECONDS = 4.0      # length of each sample window in seconds
 MP4_CRF = "18"        # visually near-lossless
 MP4_CRF_SMALL = "23"  # noticeably smaller, still good quality
 MP4_AUDIO_BITRATE = "192k"
+
+VP9_CRF = "20"        # -t vp9
+VP9_CRF_HQ = "18"     # -t vp9-hq
+VP9_CPU_USED = "2"    # 0 = best/slowest ... 5 = fastest; 2 is a good balance
+VP9_TILE_COLUMNS = "6"  # log2; libvpx lowers it to what the resolution allows (1080p: 2, 4K: 3)
+
+# What a video becomes when -t is not given. Change it here, or per shell with
+# TOVINCI_DEFAULT_TYPE=vp9 (dnxhr, vp9, vp9-hq, mp4, mp4-small, prores, prores-422, ...).
+DEFAULT_VIDEO_TYPE = os.environ.get("TOVINCI_DEFAULT_TYPE", "dnxhr").strip().lower()
 # ProRes profile name -> (prores_ks profile number, display label)
 PRORES_PROFILES = {
     "proxy": ("0", "ProRes 422 Proxy"),
@@ -63,8 +96,8 @@ PRORES_PROFILES = {
     "422": ("2", "ProRes 422"),
     "hq": ("3", "ProRes 422 HQ"),
 }
-TYPE_CHOICES = ("wav, wav-16, wav-24, wav-32, mp4, mp4-small, prores, prores-hq, "
-                "prores-422, prores-lt, prores-proxy")
+TYPE_CHOICES = ("wav, wav-16, wav-24, wav-32, dnxhr, mp4, mp4-small, vp9, vp9-hq, "
+                "prores, prores-hq, prores-422, prores-lt, prores-proxy")
 
 VIDEO_EXTS = {"mov", "mp4", "mkv", "avi", "webm", "m4v", "mpg", "mpeg", "ts", "mts",
               "m2ts", "wmv", "flv", "mxf", "ogv", "3gp"}
@@ -84,6 +117,14 @@ examples:
   tovinci -t mp4-small clip.mov    even smaller .mp4 (lower quality)
   tovinci -t prores clip.mov       ProRes 422 HQ in a .mov
   tovinci -t prores-lt clip.mov    smaller ProRes (422 LT)
+  tovinci -t vp9 clip.mov          VP9 (CRF 20) + ALAC in .mkv, far smaller than DNxHR
+  tovinci -t vp9-hq clip.mov       VP9 (CRF 18): higher quality, bigger
+  tovinci -t vp9 --cpu-used 4 c.mov  VP9 encoded faster (0 best/slowest ... 5 fastest)
+  tovinci --queue-add -r -sa -t vp9-hq a.mov ../Other/b.mov   line up jobs (any path)
+  tovinci --queue-add -j 2 -r -sa *.mov   queue every .mov here, two at a time
+  tovinci --queue-run              run the queued jobs, one folder at a time, 15 s gap per slot
+  tovinci --queue-list             show the queue
+  tovinci -t dnxhr clip.mov        DNxHR, even if the default type was changed to vp9
   tovinci --bits 16 clip.mov       normal conversion, but force 16-bit PCM audio
   tovinci --threaded huge.mov      force multi-threaded encoding regardless of size
   tovinci -j 4 *.mov               process up to 4 files concurrently
@@ -96,6 +137,7 @@ examples:
   tovinci -c --keep-order Name b.mov a.mov    combine in exactly the order given
   tovinci -c Name --no-convert a.mov b.mov    combine only, no conversion
   tovinci -r -c -sa Name a.mov b.mov          resumable combine (re-run the same command to resume)
+  tovinci -r -c -sa -j 3 -t vp9 Name *.mov    resumable combine, 3 clips encoded at the same time
   tovinci -n -c Name a.mov b.mov              dry run: estimate the combined size, write nothing
   tovinci -n -t mp4 *.mov                     dry run: estimate each file's size as mp4
   tovinci -o /path/to/out *.mov               write every converted file into /path/to/out
@@ -109,11 +151,17 @@ types (-t):
   prores-422                      ProRes 422
   prores-lt                       ProRes 422 LT
   prores-proxy                    ProRes 422 Proxy
+  dnxhr                           DNxHR (HQ, or HQX for high bit-depth sources) in .mov with PCM audio
+  vp9                             VP9 (CRF 20, row-mt) + ALAC in .mkv, far smaller than DNxHR
+  vp9-hq                          VP9 (CRF 18, row-mt) + ALAC in .mkv
+  With no -t, the type is DEFAULT_VIDEO_TYPE (edit it near the top of this file) or the
+  TOVINCI_DEFAULT_TYPE environment variable, e.g. TOVINCI_DEFAULT_TYPE=vp9 tovinci clip.mov
   Images still become JPEG and audio-only files still become WAV with the video types.
-  Note: the free DaVinci Resolve on Linux may not decode H.264/AAC mp4 files.
+  Note: the free DaVinci Resolve on Linux may not decode H.264/AAC mp4 files, and VP9 or ALAC
+  support there is not guaranteed. Test a short clip in Resolve before converting a big batch.
 
 PCM audio bit depth defaults to each source track's depth (lossy sources such as AAC become 16-bit).
-mp4 types use AAC audio, so --bits does not apply to them.
+mp4 types use AAC audio and vp9 types use ALAC audio, so --bits does not apply to them.
 
 clip order (-c):
   Clips are combined in natural order (1, 2, ... 9, 10), not plain text order (1, 10, 2, ...),
@@ -125,8 +173,9 @@ resume (-r):
   clips with a fast stream copy. If the run is interrupted, re-running the identical
   command skips every clip that already finished. Batch mode skips files that already
   finished. A clip that was mid-encode when interrupted is redone from its start.
-  The work directory defaults to ~/.cache/tovinci.
+  The work directory defaults to ~/.cache/tovinci and may never be under /mnt/Data.
   Peak disk use is roughly twice the final output (the parts plus the joined file).
+  With -j N, N clips are encoded at the same time and the CPU threads are split between them.
 
 dry run (-n):
   Nothing is written to the output location. For each clip, a few short sample windows are
@@ -135,6 +184,42 @@ dry run (-n):
   the clip's full duration. DNxHR is close to constant bitrate, so its estimate is tight;
   mp4 and ProRes vary with content, so treat those as a ballpark. Combine with -c to see the
   size of the combined file, and with -t to compare formats. Free disk space is reported too.
+
+vp9 threading (-t vp9, -t vp9-hq):
+  libvpx only spreads one encode over many threads when row-mt is on, so it always is, with
+  the tile columns maxed for the resolution and -threads set to the CPU thread count divided
+  by -j. That keeps far more cores busy than the libvpx defaults, but a single 1080p encode
+  still cannot use every thread of a 32-thread CPU. To fill it, encode several clips at once:
+  -r -c -j 3 (3 clips at a time, about 10 threads each), or -j 3 on a batch of separate files.
+  Encoding is slow (CRF mode, cpu-used 2): expect well under realtime, so use -r on long jobs.
+  --cpu-used N (0 to 5) trades speed for compression: each step up is roughly 1.5 to 2 times
+  faster and gives a slightly bigger or softer file at the same CRF. The default is 2.
+
+job queue (--queue-add, --queue-run):
+  Lines up conversions and runs them one after another, so no bash loop is needed.
+    tovinci --queue-add -t vp9-hq -sa clip1.mov ../Other/clip2.mov /full/path/clip3.mov
+    tovinci --queue-run
+  --queue-add takes the normal options and inputs. Inputs may be in the current folder, a
+  relative path or a full path. Every input file becomes its own job, or all of them become
+  one job with -c. A job runs as if you had cd'd into the folder of its input (the first one
+  with -c), so the outputs land next to the source unless -o is given. Relative -o and
+  --work-dir paths are made absolute when the job is added.
+  --queue-run works through the jobs in the order they were added. When a job ends, its slot
+  waits 15 seconds (--queue-gap SECONDS) so the output is completely written, then the next
+  job starts. Jobs added while it runs are picked up. A failed job is marked and the queue
+  carries on, unless --queue-stop-on-error is given. Ctrl-C stops the queue; the jobs that
+  were running go back to waiting, and with -r in their options they resume where they left
+  off on the next --queue-run.
+  -j goes with --queue-add and is stored per job. For separate files, -j 2 lets two of those
+  jobs run at the same time (each gets half of the CPU threads). With -c -r, it is the number
+  of clips encoded at once within that one combine job, exactly as without the queue.
+  Only one folder is worked on at a time: jobs in the same folder may run side by side up to
+  their -j, but a job in another folder waits until every job in the current folder has
+  finished (plus the gap). That also holds for a plain tovinci run you started yourself in
+  another folder: the queue does not touch a second folder until that run is over.
+  --queue-list shows the jobs, --queue-clear removes finished ones, --queue-remove ID removes
+  one. The queue lives in ~/.local/state/tovinci (or $XDG_STATE_HOME/tovinci), never under
+  /mnt/Data. Only one runner works on the queue at a time.
 
 output location (-o):
   -o DIR puts every output file (the converted video, JPEG or WAV, split audio WAVs, and the
@@ -156,6 +241,7 @@ class Options:
     target_type: str = ""
     quality: str = ""
     bits: str | None = None
+    cpu_used: int | None = None  # VP9 -cpu-used override; None means VP9_CPU_USED
     threaded: bool = False
     jobs: int = 1
     gpu_requested: bool = False
@@ -171,6 +257,13 @@ class Options:
     work_dir: Path | None = None
     dry_run: bool = False
     output_dir: Path | None = None
+    default_target: str = "dnxhr"  # video type used when -t is not given (DEFAULT_VIDEO_TYPE)
+    default_quality: str = ""
+    queue_action: str = ""           # add, run, list, clear, remove, or "" for a normal run
+    queue_remove_id: int | None = None
+    queue_gap: int | None = None
+    queue_stop: bool = False
+    option_argv: list = field(default_factory=list)  # the options as typed, for --queue-add
 
 
 @dataclass
@@ -336,9 +429,22 @@ def quote_for_concat(path: str) -> str:
     return path.replace("'", "'\\''")
 
 
+def eff_target(opts: Options) -> str:
+    """Video type in effect: the -t type, or the default type when -t was not given."""
+    return opts.target_type or opts.default_target
+
+
+def eff_quality(opts: Options) -> str:
+    """Quality variant (small, hq, a ProRes profile...) that goes with eff_target()."""
+    return opts.quality if opts.target_type else opts.default_quality
+
+
 def video_ext(opts: Options) -> str:
     """Container extension for converted video output."""
-    return "mp4" if opts.target_type == "mp4" else "mov"
+    target = eff_target(opts)
+    if target == "vp9":
+        return "mkv"
+    return "mp4" if target == "mp4" else "mov"
 
 
 def human_size(num: float) -> str:
@@ -488,11 +594,20 @@ def pcm_codec_for_track(path: str, idx: int, bits_override: str | None) -> str:
 def set_audio_codec_args(kind: str, path: str, audio_count: int, opts: Options, log) -> list:
     """Codec args matching the source depth per track (or the forced depth).
 
-    mp4 video output uses AAC instead, since PCM does not belong in an mp4.
+    mp4 video output uses AAC instead, since PCM does not belong in an mp4, and vp9
+    video output uses lossless ALAC.
     """
-    if kind == "video" and opts.target_type == "mp4":
+    if kind == "video" and eff_target(opts) == "mp4":
         args = ["-c:a", "aac", "-b:a", MP4_AUDIO_BITRATE]
         log(f"mp4 output uses AAC audio at {MP4_AUDIO_BITRATE}: {' '.join(args)}")
+        return args
+
+    if kind == "video" and eff_target(opts) == "vp9":
+        args = ["-c:a", "alac"]
+        if opts.bits:
+            log(f"vp9 output uses ALAC audio, so --bits {opts.bits} is ignored: {' '.join(args)}")
+        else:
+            log(f"vp9 output uses lossless ALAC audio: {' '.join(args)}")
         return args
 
     if kind == "video" and audio_count > 1 and not opts.combine_audio:
@@ -612,7 +727,7 @@ def build_plan(input_file: str, stem: str | None, opts: Options, gpu: Gpu | None
     has_audio = probe_value(input_file, "a:0", "codec_type")
 
     if not has_video and has_audio == "audio":
-        if opts.target_type in ("mp4", "prores"):
+        if opts.target_type in ("mp4", "prores", "vp9"):
             log(f"No video stream in '{input_file}', so the -t {opts.target_type} video type does not apply. Writing WAV instead.")
         log("Sole audio file detected. Automagically configuring for DaVinci Resolve Linux audio compatibility...")
         return Plan(pre, inp, audio_only_outputs(input_file, stem, audio_count, opts, log, drop_video=False))
@@ -620,24 +735,45 @@ def build_plan(input_file: str, stem: str | None, opts: Options, gpu: Gpu | None
     pix_fmt = probe_value(input_file, "v:0", "pix_fmt")
     log(f"Detected source pixel format: {pix_fmt}")
 
-    if opts.target_type == "mp4":
-        crf = MP4_CRF_SMALL if opts.quality == "small" else MP4_CRF
+    target = eff_target(opts)
+    quality = eff_quality(opts)
+    high_depth = "10" in pix_fmt or "12" in pix_fmt or "le" in pix_fmt
+
+    if target == "mp4":
+        crf = MP4_CRF_SMALL if quality == "small" else MP4_CRF
         log(f"Transcoding to H.264 (CRF {crf}) in an mp4 container...")
         args = ["-map", "0:v:0", "-c:v", "libx264", "-preset", "medium", "-crf", crf,
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
-    elif opts.target_type == "prores":
-        number, label = PRORES_PROFILES[opts.quality or "hq"]
+    elif target == "prores":
+        number, label = PRORES_PROFILES[quality or "hq"]
         log(f"Transcoding to {label} (10-bit 4:2:2) in a mov container...")
         args = ["-map", "0:v:0", "-c:v", "prores_ks", "-profile:v", number, "-vendor", "apl0",
                 "-pix_fmt", "yuv422p10le"]
-    elif "10" in pix_fmt or "12" in pix_fmt or "le" in pix_fmt:
+    elif target == "vp9":
+        crf = VP9_CRF_HQ if quality == "hq" else VP9_CRF
+        vp9_pix = "yuv420p10le" if high_depth else "yuv420p"
+        cpu_used = str(opts.cpu_used) if opts.cpu_used is not None else VP9_CPU_USED
+        log(f"Transcoding to VP9 (CRF {crf}, cpu-used {cpu_used}, {vp9_pix}) in an mkv container...")
+        # -b:v 0 makes -crf a pure constant-quality mode. Without -row-mt 1 libvpx only
+        # parallelizes across tile columns, so a 1080p encode would crawl on a few threads.
+        args = ["-map", "0:v:0", "-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0",
+                "-row-mt", "1", "-tile-columns", VP9_TILE_COLUMNS, "-cpu-used", cpu_used,
+                "-pix_fmt", vp9_pix]
+    elif high_depth:
         log("High bit-depth detected. Transcoding to 10-bit DNxHR HQX...")
         args = ["-map", "0:v:0", "-c:v", "dnxhd", "-profile:v", "dnxhr_hqx", "-pix_fmt", "yuv422p10le"]
     else:
         log("Standard bit-depth detected. Transcoding to 8-bit DNxHR HQ...")
         args = ["-map", "0:v:0", "-c:v", "dnxhd", "-profile:v", "dnxhr_hq", "-pix_fmt", "yuv422p"]
 
-    if use_threads:
+    if target == "vp9":
+        # Always set explicitly (not only for --threaded or big inputs) and share the CPU
+        # between concurrent encodes (-j), so the encoders do not fight over the same threads.
+        jobs = 1 if opts.dry_run else max(1, opts.jobs)
+        vp9_threads = max(1, thread_count // jobs)
+        log(f"VP9 row-mt enabled with {vp9_threads} encoder threads ({thread_count} CPU threads, {jobs} job(s)).")
+        args += ["-threads", str(vp9_threads)]
+    elif use_threads:
         if opts.threaded:
             log(f"Threaded mode forced (--threaded). Using {thread_count} encoder threads.")
         else:
@@ -660,8 +796,10 @@ def build_plan(input_file: str, stem: str | None, opts: Options, gpu: Gpu | None
             args.append("-an")
             extras = build_split_outputs(0, stem, input_file, audio_count, opts, log)
         else:
-            if opts.target_type == "mp4":
+            if target == "mp4":
                 log("Audio stream detected. Encoding it as AAC.")
+            elif target == "vp9":
+                log("Audio stream detected. Encoding it as ALAC (lossless).")
             else:
                 log("Audio stream detected. Retaining uncompressed audio.")
             sel = build_audio_args("video", input_file, audio_count, opts, log)
@@ -796,27 +934,30 @@ def job_key(inputs: list, stem: str, opts: Options) -> str:
     for f in inputs:
         st = os.stat(f)
         items.append([os.path.abspath(f), st.st_size, st.st_mtime_ns])
+    key_opts = {"bits": opts.bits, "ca": opts.combine_audio, "sa": opts.split_audio,
+                "t": eff_target(opts), "q": eff_quality(opts), "nc": opts.no_convert}
+    if eff_target(opts) == "vp9" and opts.cpu_used is not None:
+        key_opts["cpu"] = opts.cpu_used  # different speed setting, different parts
     payload = json.dumps({
         "inputs": items,
         "stem": os.path.abspath(stem),
-        "opts": {"bits": opts.bits, "ca": opts.combine_audio, "sa": opts.split_audio,
-                 "t": opts.target_type, "q": opts.quality, "nc": opts.no_convert},
+        "opts": key_opts,
         "v": 1,
     }, sort_keys=True)
     return hashlib.sha1(payload.encode()).hexdigest()[:16]
 
 
 def state_root(opts: Options) -> Path:
-    """Directory for resume data. Never allowed under TOVINCI_FORBIDDEN_ROOT, if set."""
+    """Directory for resume data. Never allowed under /mnt/Data."""
     if opts.work_dir is not None:
         root = opts.work_dir.expanduser()
     else:
         base = os.environ.get("XDG_CACHE_HOME")
         root = (Path(base) if base else Path.home() / ".cache") / "tovinci"
     real = os.path.realpath(root)
-    if FORBIDDEN_CACHE_ROOT and (real == FORBIDDEN_CACHE_ROOT or real.startswith(FORBIDDEN_CACHE_ROOT + os.sep)):
+    if real == FORBIDDEN_CACHE_ROOT or real.startswith(FORBIDDEN_CACHE_ROOT + os.sep):
         raise ToolError(f"resume data must not live under {FORBIDDEN_CACHE_ROOT} (got '{root}'). "
-                        "Use --work-dir to pick another location.")
+                        "Use --work-dir to pick a location on the primary drive.")
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -942,7 +1083,7 @@ def run_dry_run(files: list, opts: Options, gpu: Gpu | None, logger: Logger, com
                   f"{DRY_RUN_WINDOWS} x {DRY_RUN_SECONDS:.0f}s per clip...")
 
     results: list = []
-    root = state_root(opts)
+    root = state_root(opts)  # sample files stay on the primary drive, never under /mnt/Data
     size_override = total_in if combine else None
     with tempfile.TemporaryDirectory(prefix="dryrun-", dir=str(root)) as tmp:
         for idx, clip in enumerate(files):
@@ -991,8 +1132,8 @@ def report_dry_run(results: list, total_in: int, opts: Options, combine: bool) -
     if unknown:
         print(f"Note: {unknown} file(s) could not be estimated and are not included in the total.")
     if not all_exact:
-        print("Estimates come from short samples; DNxHR is close to constant bitrate, while mp4 and "
-              "ProRes vary with content.")
+        print("Estimates come from short samples; DNxHR is close to constant bitrate, while mp4, "
+              "ProRes and VP9 vary with content.")
 
     try:
         target = opts.output_dir if opts.output_dir is not None else Path.cwd()
@@ -1069,7 +1210,7 @@ def run_combine(files: list, opts: Options, gpu: Gpu | None, logger: Logger) -> 
         candidates = [out]
     else:
         out = f"{stem}.{video_ext(opts)}"
-        candidates = [f"{stem}.mov", f"{stem}.mp4", f"{stem}.wav"] + [f"{stem}_a{n}.wav" for n in range(1, 5)]
+        candidates = [f"{stem}.mov", f"{stem}.mp4", f"{stem}.mkv", f"{stem}.wav"] + [f"{stem}_a{n}.wav" for n in range(1, 5)]
 
     # Never overwrite one of the inputs.
     for cand in candidates:
@@ -1143,26 +1284,59 @@ def combine_resumable(files: list, stem: str, total_size: int, opts: Options,
     note_work_dir(root, logger)
 
     count = len(files)
-    parts: list = []  # parts[k] = output paths of clip k, in plan order
+    parts: list = [None] * count  # parts[k] = output paths of clip k, in plan order
+    pending: list = []            # clips that still need encoding: (idx, clip, plan, marker, outs)
+    failed = threading.Event()
+
+    def encode_clip(item: tuple) -> int | None:
+        """Encode one clip into its part files. None means it was skipped because an earlier
+        clip already failed."""
+        idx, clip, plan, marker, outs = item
+        if failed.is_set():
+            return None
+        lg = logger.child(f"[{idx + 1}/{count}] ") if opts.jobs > 1 else logger
+        logger.notify(f"[{idx + 1}/{count}] Encoding '{clip}'...")
+        status = encode(plan, opts, lg, clip, use_temp=True)
+        if status != 0:
+            failed.set()
+            return status
+        marker.write_text(json.dumps(outs))
+        return 0
+
     try:
         for idx, clip in enumerate(files):
             part_stem = str(state / f"part_{idx:04d}")
             marker = state / f"part_{idx:04d}.done.json"
             plan = build_plan(clip, part_stem, opts, gpu, logger.log, size_override=total_size)
             outs = [p for _, p in plan.outputs]
+            parts[idx] = outs
 
             if marker.exists() and all(os.path.exists(p) for p in outs):
                 logger.notify(f"[{idx + 1}/{count}] Already encoded, skipping: '{clip}'")
-                parts.append(outs)
                 continue
+            pending.append((idx, clip, plan, marker, outs))
 
-            logger.notify(f"[{idx + 1}/{count}] Encoding '{clip}'...")
-            status = encode(plan, opts, logger, clip, use_temp=True)
-            if status != 0:
-                print("Re-run the same command to resume from this clip.", file=sys.stderr)
-                return status
-            marker.write_text(json.dumps(outs))
-            parts.append(outs)
+        if opts.jobs > 1 and len(pending) > 1:
+            # Independent clips encode at the same time; each one gets its share of the CPU
+            # threads (see build_plan). An interruption or failure stops clips not yet started.
+            with ThreadPoolExecutor(max_workers=min(opts.jobs, len(pending))) as pool:
+                try:
+                    results = list(pool.map(encode_clip, pending))
+                except BaseException:
+                    failed.set()
+                    raise
+        else:
+            results = []
+            for item in pending:
+                status = encode_clip(item)
+                results.append(status)
+                if status:
+                    break
+
+        bad = [r for r in results if r]
+        if bad:
+            print("Re-run the same command to resume; clips that already finished are kept.", file=sys.stderr)
+            return bad[0]
 
         # Same output names as a normal combine, worked out without logging.
         final_plan = build_plan(files[0], stem, opts, gpu, lambda _m: None, size_override=total_size)
@@ -1220,8 +1394,12 @@ def build_parser() -> Parser:
     p.add_argument("-t", dest="target_type", default="", metavar="TYPE",
                    help=f"force an output type: {TYPE_CHOICES}")
     p.add_argument("--bits", default=None, metavar="N", help="force PCM audio bit depth: 16, 24 or 32")
+    p.add_argument("--cpu-used", type=int, default=None, metavar="N", choices=range(0, 6),
+                   help=f"VP9 only: speed/quality trade-off from 0 (best, slowest) to 5 (fastest); "
+                        f"default {VP9_CPU_USED}")
     p.add_argument("--threaded", action="store_true", help="force multi-threaded encoding regardless of size")
-    p.add_argument("-j", "--jobs", type=int, default=1, metavar="N", help="process up to N files concurrently")
+    p.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
+                   help="process up to N files concurrently (with -r -c: encode N clips at once)")
     p.add_argument("--use-gpu", type=parse_bool, default=False, metavar="true|false",
                    help="decode on GPU if a backend is available (use as -use-gpu=true)")
     p.add_argument("-ca", "--combine-audio", action="store_true", help="mix all audio tracks into one stereo track")
@@ -1238,12 +1416,23 @@ def build_parser() -> Parser:
     p.add_argument("--restart", action="store_true", help="with -r: discard saved progress and start over")
     p.add_argument("--keep-work", action="store_true", help="with -r: keep work files after a successful run")
     p.add_argument("--work-dir", type=Path, default=None, metavar="DIR",
-                   help="with -r: where resume data lives (default ~/.cache/tovinci)")
+                   help="with -r: where resume data lives (default ~/.cache/tovinci, never under /mnt/Data)")
     p.add_argument("-n", "--dry-run", action="store_true",
                    help="estimate the output size (per file, or combined with -c) from short samples "
                         "without writing any output files")
     p.add_argument("-o", "--output-dir", type=Path, default=None, metavar="DIR",
                    help="write all output files into DIR (created if missing); default is the current directory")
+    p.add_argument("--queue-add", action="store_true",
+                   help="add the given inputs and options to the job queue instead of converting now")
+    p.add_argument("--queue-run", action="store_true",
+                   help=f"run the queued jobs one after another, waiting {QUEUE_GAP_DEFAULT} seconds between them")
+    p.add_argument("--queue-list", action="store_true", help="show the queued jobs")
+    p.add_argument("--queue-clear", action="store_true", help="remove finished (done or failed) jobs from the queue")
+    p.add_argument("--queue-remove", type=int, default=None, metavar="ID", help="remove one job from the queue")
+    p.add_argument("--queue-gap", type=int, default=None, metavar="SECONDS",
+                   help=f"with --queue-run: seconds to wait after each job (default {QUEUE_GAP_DEFAULT})")
+    p.add_argument("--queue-stop-on-error", action="store_true",
+                   help="with --queue-run: stop at the first failed job instead of carrying on")
     p.add_argument("inputs", nargs="*", metavar="file_or_pattern")
     return p
 
@@ -1272,6 +1461,24 @@ def preprocess_argv(argv: list) -> list:
     return out
 
 
+def default_video_type(parser: Parser) -> tuple:
+    """(target, quality) for DEFAULT_VIDEO_TYPE, the video type used when -t is not given."""
+    name = DEFAULT_VIDEO_TYPE
+    if name in ("dnxhr", "mp4", "vp9"):
+        return name, ""
+    if name == "mp4-small":
+        return "mp4", "small"
+    if name == "vp9-hq":
+        return "vp9", "hq"
+    if name == "prores":
+        return "prores", "hq"
+    if name.startswith("prores-") and name.split("-", 1)[1] in PRORES_PROFILES:
+        return "prores", name.split("-", 1)[1]
+    parser.error(f"unsupported default video type '{name}' (DEFAULT_VIDEO_TYPE / TOVINCI_DEFAULT_TYPE). "
+                 "Use one of: dnxhr, mp4, mp4-small, vp9, vp9-hq, prores, prores-hq, prores-422, "
+                 "prores-lt, prores-proxy.")
+
+
 def parse_args(argv: list) -> tuple:
     parser = build_parser()
     if not argv:
@@ -1298,17 +1505,25 @@ def parse_args(argv: list) -> tuple:
         elif target.startswith("prores-") and target.split("-", 1)[1] in PRORES_PROFILES:
             quality = target.split("-", 1)[1]
             target = "prores"
+        elif target == "dnxhr":
+            pass
+        elif target == "vp9":
+            pass
+        elif target == "vp9-hq":
+            target = "vp9"
+            quality = "hq"
         else:
             parser.error(f"unsupported -t type '{ns.target_type}' (supported: {TYPE_CHOICES}).")
     if bits is not None and str(bits) not in ("16", "24", "32"):
         parser.error(f"bit depth must be 16, 24 or 32 (got '{bits}').")
-    if target == "mp4" and bits is not None:
-        parser.error("--bits only applies to PCM audio, but mp4 output uses AAC audio.")
+    if target in ("mp4", "vp9") and bits is not None:
+        codec_name = "AAC" if target == "mp4" else "ALAC"
+        parser.error(f"--bits only applies to PCM audio, but {target} output uses {codec_name} audio.")
     if ns.jobs < 1:
         parser.error(f"-j/--jobs must be a positive integer (got '{ns.jobs}').")
     if ns.no_convert and not ns.combine:
         parser.error("--no-convert can only be used together with -c/--combine.")
-    if ns.no_convert and target in ("mp4", "prores"):
+    if ns.no_convert and target in ("mp4", "prores", "vp9", "dnxhr"):
         parser.error(f"-t {ns.target_type} cannot be used with --no-convert (the video would need to be re-encoded).")
     if ns.no_convert and ns.combine_audio:
         parser.error("-ca/--combine-audio cannot be used with --no-convert (mixing audio requires re-encoding it).")
@@ -1323,7 +1538,22 @@ def parse_args(argv: list) -> tuple:
         parser.error("--keep-order can only be used together with -c/--combine.")
     if (ns.restart or ns.keep_work or ns.work_dir) and not ns.resumable:
         parser.error("--restart, --keep-work and --work-dir require -r/--resumable.")
-    if not ns.inputs:
+    queue_choices = [name for name, on in (("add", ns.queue_add), ("run", ns.queue_run),
+                                           ("list", ns.queue_list), ("clear", ns.queue_clear),
+                                           ("remove", ns.queue_remove is not None)) if on]
+    if len(queue_choices) > 1:
+        parser.error("use only one of --queue-add, --queue-run, --queue-list, --queue-clear, --queue-remove.")
+    queue_action = queue_choices[0] if queue_choices else ""
+    if queue_action not in ("", "add") and ns.inputs:
+        parser.error(f"--queue-{queue_action} does not take input files.")
+    if (ns.queue_gap is not None or ns.queue_stop_on_error) and queue_action != "run":
+        parser.error("--queue-gap and --queue-stop-on-error only apply together with --queue-run.")
+    if queue_action not in ("", "add") and ns.jobs != 1:
+        parser.error("-j is stored per job: give it with --queue-add (tovinci --queue-add -j 2 ...), "
+                     f"not with --queue-{queue_action}.")
+    if ns.queue_gap is not None and ns.queue_gap < 0:
+        parser.error(f"--queue-gap cannot be negative (got '{ns.queue_gap}').")
+    if not ns.inputs and queue_action in ("", "add"):
         parser.print_usage(sys.stderr)
         sys.exit(1)
 
@@ -1332,6 +1562,9 @@ def parse_args(argv: list) -> tuple:
         combine_name = os.path.splitext(combine_name)[0]
 
     output_dir = ns.output_dir.expanduser() if ns.output_dir is not None else None
+    default_target, default_quality = default_video_type(parser)
+    if ns.cpu_used is not None and (target or default_target) != "vp9":
+        parser.error("--cpu-used only applies to VP9 output (-t vp9, -t vp9-hq, or a vp9 default type).")
 
     opts = Options(verbose=ns.verbose, target_type=target, quality=quality,
                    bits=str(bits) if bits is not None else None,
@@ -1340,7 +1573,11 @@ def parse_args(argv: list) -> tuple:
                    split_audio=ns.split_audio, resumable=ns.resumable, keep_order=ns.keep_order,
                    restart=ns.restart,
                    keep_work=ns.keep_work, work_dir=ns.work_dir, dry_run=ns.dry_run,
-                   output_dir=output_dir)
+                   output_dir=output_dir, default_target=default_target,
+                   default_quality=default_quality, cpu_used=ns.cpu_used,
+                   queue_action=queue_action, queue_remove_id=ns.queue_remove,
+                   queue_gap=ns.queue_gap, queue_stop=ns.queue_stop_on_error,
+                   option_argv=option_args(parser, ns) if queue_action == "add" else [])
     return opts, ns.inputs
 
 
@@ -1360,20 +1597,414 @@ def resolve_files(patterns: list) -> list:
     return files
 
 
+# ------------------------------------------------------------------ queue ---
+
+def option_args(parser: Parser, ns: argparse.Namespace) -> list:
+    """The options of this run as command-line tokens (inputs and queue options left out),
+    so a queued job can later be run exactly as it was typed."""
+    out: list = []
+    for act in parser._actions:
+        if not act.option_strings or act.dest in ("help", "version") or act.dest.startswith("queue_"):
+            continue
+        value = getattr(ns, act.dest, None)
+        if value is None or value == act.default:
+            continue
+        longs = [o for o in act.option_strings if o.startswith("--")]
+        name = longs[0] if longs else act.option_strings[0]
+        if isinstance(act, argparse._CountAction):
+            out += [act.option_strings[0]] * int(value)
+        elif isinstance(act, argparse._StoreTrueAction):
+            out.append(name)
+        else:
+            if act.dest in ("output_dir", "work_dir"):
+                value = os.path.abspath(os.path.expanduser(str(value)))
+            text = ("true" if value else "false") if isinstance(value, bool) else str(value)
+            out += [f"{name}={text}"] if longs else [name, text]
+    return out
+
+
+def queue_root() -> Path:
+    """Directory holding the queue. Never allowed under /mnt/Data."""
+    base = os.environ.get("XDG_STATE_HOME")
+    root = (Path(base) if base else Path.home() / ".local" / "state") / "tovinci"
+    real = os.path.realpath(root)
+    if real == FORBIDDEN_CACHE_ROOT or real.startswith(FORBIDDEN_CACHE_ROOT + os.sep):
+        raise ToolError(f"the queue must not live under {FORBIDDEN_CACHE_ROOT} (got '{root}'). "
+                        "Set XDG_STATE_HOME to a location on the primary drive.")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ToolError(f"could not create the queue directory '{root}': {exc}")
+    return root
+
+
+@contextmanager
+def queue_locked():
+    """Exclusive lock around reading and changing the queue file. Yields the file's path."""
+    root = queue_root()
+    with open(root / "queue.lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield root / "queue.json"
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def queue_load(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as exc:
+        raise ToolError(f"the queue file '{path}' could not be read: {exc}")
+    data.setdefault("next_id", 1)
+    data.setdefault("jobs", [])
+    return data
+
+
+def queue_save(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def now_stamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def queue_job_text(job: dict) -> str:
+    return f"tovinci {shlex.join(job['argv'])}"
+
+
+def queue_add(opts: Options, patterns: list) -> int:
+    files = resolve_files(patterns)
+    if not files:
+        print("Error: no valid input files found.", file=sys.stderr)
+        return 1
+    if opts.combine and len(files) < 2:
+        print(f"Error: -c/--combine needs at least 2 valid input files (found {len(files)}).", file=sys.stderr)
+        return 1
+    files = [os.path.abspath(f) for f in files]
+    groups = [files] if opts.combine else [[f] for f in files]
+
+    with queue_locked() as qpath:
+        data = queue_load(qpath)
+        for group in groups:
+            # lanes: how many encodes this job runs at once; cap: how many lanes may be busy in
+            # its folder when it starts. A combine encodes -j clips itself; separate files
+            # are separate jobs that may overlap up to -j.
+            lanes = opts.jobs if (opts.combine and opts.resumable and not opts.no_convert) else 1
+            cap = lanes if opts.combine else opts.jobs
+            job = {"id": data["next_id"], "status": "pending", "added": now_stamp(),
+                   "cwd": os.path.dirname(group[0]), "lanes": lanes, "cap": cap,
+                   "argv": list(opts.option_argv) + group}
+            data["next_id"] += 1
+            data["jobs"].append(job)
+            what = f"{len(group)} files combined" if opts.combine else os.path.basename(group[0])
+            more = f", up to {cap} at a time" if cap > 1 else ""
+            print(f"Queued job {job['id']}: {what}  (runs in {job['cwd']}{more})")
+        queue_save(qpath, data)
+        waiting = sum(1 for j in data["jobs"] if j["status"] in ("pending", "running"))
+    print(f"{waiting} job(s) waiting. Start them with: tovinci --queue-run")
+    return 0
+
+
+def queue_list() -> int:
+    with queue_locked() as qpath:
+        data = queue_load(qpath)
+    if not data["jobs"]:
+        print("The queue is empty.")
+        return 0
+    for job in data["jobs"]:
+        print(f"{job['id']:>4}  {job['status']:<8}  {queue_job_text(job)}")
+        print(f"      in {job['cwd']}")
+    return 0
+
+
+def queue_clear() -> int:
+    with queue_locked() as qpath:
+        data = queue_load(qpath)
+        keep = [j for j in data["jobs"] if j["status"] in ("pending", "running")]
+        removed = len(data["jobs"]) - len(keep)
+        data["jobs"] = keep
+        queue_save(qpath, data)
+    print(f"Removed {removed} finished job(s); {len(keep)} still waiting.")
+    return 0
+
+
+def queue_runner_active() -> bool:
+    """True if another process currently holds the runner lock."""
+    with open(queue_root() / "queue.run.lock", "a+") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    return False
+
+
+def queue_remove(job_id: int) -> int:
+    active = queue_runner_active()
+    with queue_locked() as qpath:
+        data = queue_load(qpath)
+        match = [j for j in data["jobs"] if j["id"] == job_id]
+        if not match:
+            print(f"Error: there is no job {job_id} in the queue (see --queue-list).", file=sys.stderr)
+            return 1
+        if match[0]["status"] == "running" and active:
+            print(f"Error: job {job_id} is running right now. Stop the runner first (Ctrl-C).", file=sys.stderr)
+            return 1
+        data["jobs"] = [j for j in data["jobs"] if j["id"] != job_id]
+        queue_save(qpath, data)
+    print(f"Removed job {job_id}.")
+    return 0
+
+
+def queue_update(job_id: int, **changes) -> None:
+    with queue_locked() as qpath:
+        data = queue_load(qpath)
+        for job in data["jobs"]:
+            if job["id"] == job_id:
+                job.update(changes)
+        queue_save(qpath, data)
+
+
+def pid_alive(pid: int) -> bool:
+    """True if pid is a running tovinci (a recycled pid belonging to another program is not)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        return b"tovinci" in Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return True
+
+
+def active_root() -> Path:
+    root = queue_root() / "active"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def register_active(directory: str) -> None:
+    """Note that this run is working in a folder, so a queue runner can keep out of other
+    folders until it ends. Failing to do so must never stop a conversion."""
+    try:
+        path = active_root() / f"{os.getpid()}.json"
+        path.write_text(json.dumps({"pid": os.getpid(), "dir": directory, "started": now_stamp(),
+                                    "runner": int(os.environ.get("TOVINCI_QUEUE_RUNNER") or 0)}),
+                        encoding="utf-8")
+    except (OSError, ToolError, ValueError):
+        return
+    atexit.register(lambda: path.unlink(missing_ok=True))
+
+
+def other_active_dirs(runner_pid: int) -> set:
+    """Folders in use by tovinci runs that were not started by this queue runner."""
+    dirs: set = set()
+    try:
+        root = active_root()
+    except (OSError, ToolError):
+        return dirs
+    for entry in root.glob("*.json"):
+        try:
+            info = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        pid = info.get("pid")
+        if not isinstance(pid, int) or not pid_alive(pid):
+            entry.unlink(missing_ok=True)
+            continue
+        if pid == os.getpid() or info.get("runner") == runner_pid:
+            continue
+        dirs.add(info.get("dir", ""))
+    return dirs
+
+
+def admission_block(job: dict, running: list, runner_pid: int) -> str | None:
+    """None if the job may start now. Otherwise why not: a message when another folder is
+    busy, or an empty string when it is only waiting for a free slot."""
+    busy = {r["job"]["cwd"] for r in running} | other_active_dirs(runner_pid)
+    if busy and busy != {job["cwd"]}:
+        other = sorted(busy - {job["cwd"]})[0]
+        return f"waiting for '{other}' to finish before starting jobs in '{job['cwd']}'"
+    used = sum(r["lanes"] for r in running)
+    if running and used + job.get("lanes", 1) > job.get("cap", 1):
+        return ""
+    return None
+
+
+def clock() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def queue_run(opts: Options) -> int:
+    root = queue_root()
+    gap = QUEUE_GAP_DEFAULT if opts.queue_gap is None else opts.queue_gap
+    script = os.path.realpath(__file__)
+    runner_pid = os.getpid()
+    env = dict(os.environ, TOVINCI_QUEUE_RUNNER=str(runner_pid))
+
+    run_lock = open(root / "queue.run.lock", "a+")
+    try:
+        fcntl.flock(run_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Another 'tovinci --queue-run' is already working through the queue.", file=sys.stderr)
+        run_lock.close()
+        return 1
+
+    # A terminal Ctrl-C reaches the jobs as well, but kill and a closing terminal (SIGTERM,
+    # SIGHUP) only reach the runner, so those are turned into the same orderly stop.
+    term = {"hit": False}
+
+    def on_term(signum, frame):
+        term["hit"] = True
+        raise KeyboardInterrupt
+
+    old_handlers = [(sig, signal.signal(sig, on_term)) for sig in (signal.SIGTERM, signal.SIGHUP)]
+
+    # With the runner lock held, a job still marked running is left over from a run that
+    # was killed, so it is simply picked up again.
+    with queue_locked() as qpath:
+        data = queue_load(qpath)
+        for job in data["jobs"]:
+            if job["status"] == "running":
+                job["status"] = "pending"
+        queue_save(qpath, data)
+
+    running: list = []  # {"job", "proc", "lanes", "rc", "release_at", "fake_rc"}
+    announced: set = set()
+    ran = done = failed = 0
+    stopping = False
+    try:
+        while True:
+            now = time.monotonic()
+            for r in running:
+                if r["rc"] is not None:
+                    continue
+                rc = r["proc"].poll() if r["proc"] else r["fake_rc"]
+                if rc is None:
+                    continue
+                r["rc"] = rc
+                r["release_at"] = now + gap
+                jid = r["job"]["id"]
+                if rc == 0:
+                    done += 1
+                    queue_update(jid, status="done", exit=0, finished=now_stamp())
+                    print(f"{clock()} Job {jid} finished. Its slot is free again in {gap} seconds "
+                          "(so the output is fully written).", flush=True)
+                else:
+                    failed += 1
+                    queue_update(jid, status="failed", exit=rc, finished=now_stamp())
+                    print(f"{clock()} Job {jid} failed (exit code {rc}).", file=sys.stderr, flush=True)
+                    if opts.queue_stop and not stopping:
+                        stopping = True
+                        print("Stopping because of --queue-stop-on-error. Jobs already running finish; "
+                              "the rest stay queued.", file=sys.stderr, flush=True)
+            # A finished job keeps its slot, and its folder, busy until the gap has passed.
+            running = [r for r in running if r["rc"] is None or now < r["release_at"]]
+
+            pending = []
+            if not stopping:
+                with queue_locked() as qpath:
+                    pending = [j for j in queue_load(qpath)["jobs"] if j["status"] == "pending"]
+            if not pending and not running:
+                break
+
+            if pending:
+                job = pending[0]
+                reason = admission_block(job, running, runner_pid)
+                if reason is None:
+                    ran += 1
+                    queue_update(job["id"], status="running", started=now_stamp())
+                    print(f"\n=== {clock()} Starting queue job {job['id']} ({len(pending) - 1} more waiting) ===")
+                    print(f"{queue_job_text(job)}\n(in {job['cwd']})", flush=True)
+                    entry = {"job": job, "proc": None, "lanes": job.get("lanes", 1), "rc": None,
+                             "release_at": None, "fake_rc": None}
+                    if os.path.isdir(job["cwd"]):
+                        entry["proc"] = subprocess.Popen([sys.executable, script] + list(job["argv"]),
+                                                         cwd=job["cwd"], env=env)
+                    else:
+                        print(f"Error: the folder '{job['cwd']}' no longer exists.", file=sys.stderr)
+                        entry["fake_rc"] = 1
+                    running.append(entry)
+                elif reason and (job["id"], reason) not in announced:
+                    announced.add((job["id"], reason))
+                    print(f"{clock()} Job {job['id']} is {reason}.", flush=True)
+
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        live = [r for r in running if r["rc"] is None and r["proc"]]
+        if term["hit"]:
+            for r in live:
+                r["proc"].send_signal(signal.SIGINT)  # ask the jobs to stop cleanly too
+        deadline = time.monotonic() + 60
+        for r in live:
+            try:
+                r["proc"].wait(timeout=max(1.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                r["proc"].kill()
+                r["proc"].wait()
+        for r in running:
+            if r["rc"] is None:
+                queue_update(r["job"]["id"], status="pending")
+        print("\nQueue stopped. Interrupted jobs are waiting again; run --queue-run to continue.",
+              file=sys.stderr)
+        return 130
+    finally:
+        for sig, handler in old_handlers:
+            signal.signal(sig, handler)
+        run_lock.close()
+
+    if ran == 0:
+        print("The queue is empty. Add jobs with --queue-add.")
+        return 0
+    print(f"\nQueue finished: {done} done, {failed} failed.")
+    return 1 if failed else 0
+
+
+def handle_queue(opts: Options, patterns: list) -> int:
+    try:
+        if opts.queue_action == "add":
+            return queue_add(opts, patterns)
+        if opts.queue_action == "run":
+            return queue_run(opts)
+        if opts.queue_action == "list":
+            return queue_list()
+        if opts.queue_action == "clear":
+            return queue_clear()
+        return queue_remove(opts.queue_remove_id)
+    except ToolError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
 def main(argv: list | None = None) -> int:
     opts, patterns = parse_args(sys.argv[1:] if argv is None else argv)
+
+    if opts.queue_action:
+        return handle_queue(opts, patterns)
 
     files = resolve_files(patterns)
     if not files:
         print("Error: no valid input files found.", file=sys.stderr)
         return 1
     total = len(files)
+    if not opts.dry_run:
+        register_active(os.path.dirname(os.path.abspath(files[0])))
 
     if opts.combine:
         if total < 2:
             print(f"Error: -c/--combine needs at least 2 valid input files (found {total}).", file=sys.stderr)
             return 1
-        opts.jobs = 1  # combining produces one output, so concurrency does not apply
+        if not opts.resumable or opts.no_convert:
+            if opts.jobs > 1:
+                print("Note: -j only applies to a combine when -r is also given (clips are then "
+                      "encoded separately); continuing with one job.", file=sys.stderr)
+            opts.jobs = 1  # a single-pass combine produces one output, so concurrency does not apply
 
     gpu = None
     if opts.gpu_requested and not opts.no_convert:

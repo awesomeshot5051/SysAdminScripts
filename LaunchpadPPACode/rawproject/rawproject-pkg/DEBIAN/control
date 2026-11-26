@@ -1,0 +1,11 @@
+Package: rawproject
+Version: 1.0.0
+Architecture: all
+Maintainer: awesomeshot5051 englandtechnologies@gmail.com
+Depends: bash, openssh-client
+Recommends: btrfs-progs, snapper
+Section: utils
+Priority: optional
+Description: Raw-footage project folders on a file server or local btrfs disk
+ rawproject creates, finishes and lists raw-footage project folders on a
+ file server over ssh, or on a local btrfs disk with snapper snapshots.

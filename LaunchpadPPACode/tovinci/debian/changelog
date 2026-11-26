@@ -1,0 +1,5 @@
+tovinci (3.0.0) resolute; urgency=medium
+
+  * Update to tovinci 3.0.0: job queue (--queue-add and friends) and other improvements.
+
+ -- awesomeshot5051 <englandtechnologies@gmail.com>  Thu, 26 Nov 2026 02:02:25 -0500
